@@ -5,22 +5,24 @@ const session = require("express-session");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
-const { exec } = require("child_process");
+const { Storage } = require("megajs");
 
 const app = express();
 
-const { ADMIN_USERNAME, ADMIN_PASSWORD, MEGA_EXEC_PATH } = process.env;
+const { ADMIN_USERNAME, ADMIN_PASSWORD, MEGA_EMAIL, MEGA_PASSWORD } =
+  process.env;
+
+const PORT = process.env.PORT || 3333;
 
 app.use(
   cors({
-    origin: "http://localhost:3000", // frontend origin
+    origin: "http://localhost:3000",
     credentials: true,
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
-app.options("/*any", cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -37,10 +39,34 @@ app.use(
   })
 );
 
-const PORT = process.env.PORT || 3333;
-const MEGA_EXEC = MEGA_EXEC_PATH;
+// Track temp file cleanup timers
+const tempTimers = {}; // filename -> timeoutId
 
-// LOGIN
+function scheduleCleanup(tmpPath) {
+  const filename = path.basename(tmpPath);
+
+  // clear any existing timer (reset it if file is accessed again)
+  if (tempTimers[filename]) {
+    clearTimeout(tempTimers[filename]);
+  }
+
+  tempTimers[filename] = setTimeout(() => {
+    if (fs.existsSync(tmpPath)) {
+      fs.unlink(tmpPath, (err) => {
+        if (err) {
+          console.error(`Failed to delete ${tmpPath}:`, err.message);
+        } else {
+          console.log(`🧹 Deleted temp file: ${tmpPath}`);
+        }
+      });
+    }
+    delete tempTimers[filename];
+  }, 10 * 1000); // 10 seconds
+}
+
+// delay helper
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 app.post("/api/login", (req, res) => {
   const { username, password } = req.body;
   if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
@@ -50,30 +76,29 @@ app.post("/api/login", (req, res) => {
   res.status(401).json({ success: false });
 });
 
-// CHECK LOGIN
 app.get("/api/check", (req, res) => {
   res.json({ loggedIn: !!req.session.loggedIn });
 });
 
-// LOGOUT
 app.post("/api/logout", (req, res) => {
-  req.session.destroy(() => {
-    res.json({ success: true });
-  });
+  req.session.destroy(() => res.json({ success: true }));
 });
 
-// CHAT MESSAGES (paginated)
 app.get("/api/chat", (req, res) => {
-  if (!req.session.loggedIn) {
-    return res.status(401).send("Unauthorized");
+  if (!req.session.loggedIn) return res.status(401).send("Unauthorized");
+
+  const page = parseInt(req.query.page, 10) || 1;
+  const pageSize = parseInt(req.query.pageSize, 10) || 50;
+
+  let chatData = [];
+  try {
+    chatData = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "chat.json"), "utf-8")
+    );
+  } catch (err) {
+    console.error("Failed to read chat.json:", err.message);
+    return res.status(500).send("Server error");
   }
-
-  const page = parseInt(req.query.page) || 1;
-  const pageSize = parseInt(req.query.pageSize) || 50;
-
-  const chatData = JSON.parse(
-    fs.readFileSync(path.join(__dirname, "chat.json"), "utf-8")
-  );
 
   const totalMessages = chatData.length;
   const totalPages = Math.ceil(totalMessages / pageSize);
@@ -83,40 +108,81 @@ app.get("/api/chat", (req, res) => {
 
   const pageMessages = chatData.slice(start, end);
 
-  res.json({
-    messages: pageMessages,
-    page,
-    totalPages,
-  });
+  res.json({ messages: pageMessages, page, totalPages });
 });
 
-// SERVE MEDIA SECURELY
-app.get("/api/media/:filename", (req, res) => {
-  if (!req.session.loggedIn) {
-    return res.status(401).send("Unauthorized");
-  }
+app.get("/api/media/:filename", async (req, res) => {
+  if (!req.session.loggedIn) return res.status(401).send("Unauthorized");
 
   const filename = req.params.filename;
   const tmpPath = path.join("/tmp", filename);
 
-  const cmd = `${MEGA_EXEC} get "/media/${filename}" "${tmpPath}"`;
-
-  console.log(`Running: ${cmd}`);
-  exec(cmd, (err, stdout, stderr) => {
-    if (err) {
-      console.error(`Failed to fetch ${filename}:`, err);
-      console.error(stderr);
-      return res.status(500).send("Error fetching file from MEGA");
-    }
-
-    res.sendFile(tmpPath, (sendErr) => {
-      if (sendErr) {
-        console.error("Error sending file:", sendErr);
+  if (fs.existsSync(tmpPath)) {
+    console.log(`[cache] serving ${filename}`);
+    return res.sendFile(tmpPath, {}, (err) => {
+      if (err) {
+        console.error(`Failed to send file ${tmpPath}:`, err.message);
+      } else {
+        scheduleCleanup(tmpPath);
       }
-      fs.unlink(tmpPath, () => {}); // clean up
     });
-  });
+  }
+
+  console.log(`[download] ${filename} not cached, downloading…`);
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const storage = new Storage({
+        email: MEGA_EMAIL,
+        password: MEGA_PASSWORD,
+      });
+
+      await new Promise((resolve, reject) => {
+        storage.on("ready", resolve);
+        storage.on("error", reject);
+      });
+
+      const mediaFolder = storage.root.children.find(
+        (f) => f.name === "media" && f.directory
+      );
+
+      if (!mediaFolder) {
+        storage.close();
+        return res.status(404).send("media folder not found");
+      }
+
+      const file = mediaFolder.children.find((f) => f.name === filename);
+
+      if (!file) {
+        storage.close();
+        return res.status(404).send("file not found in media");
+      }
+
+      const ws = fs.createWriteStream(tmpPath);
+
+      await new Promise((resolve, reject) => {
+        file.download().pipe(ws).on("finish", resolve).on("error", reject);
+      });
+
+      storage.close();
+      console.log(`[done] downloaded & cached ${filename}`);
+
+      return res.sendFile(tmpPath, {}, (err) => {
+        if (err) {
+          console.error(`Failed to send file ${tmpPath}:`, err.message);
+        } else {
+          scheduleCleanup(tmpPath);
+        }
+      });
+    } catch (err) {
+      console.error(`attempt ${attempt} failed: ${err.message}`);
+      if (attempt < 3) {
+        await delay(3000);
+        continue;
+      }
+      return res.status(500).send("failed to download from MEGA");
+    }
+  }
 });
 
-// Start server
 app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
