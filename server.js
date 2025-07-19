@@ -5,20 +5,43 @@ const session = require("express-session");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
+const axios = require("axios");
 const { Storage } = require("megajs");
 
 const app = express();
 
-const { ADMIN_USERNAME, ADMIN_PASSWORD, MEGA_EMAIL, MEGA_PASSWORD } =
-  process.env;
+const {
+  ADMIN_USERNAME,
+  ADMIN_PASSWORD,
+  MEGA_EMAIL,
+  MEGA_PASSWORD,
+  CHAT_JSON_REMOTE_URL,
+} = process.env;
 
 const PORT = process.env.PORT || 3333;
-const CHAT_JSON_SECRET_PATH = "/etc/secrets/chat.json"; // adjust if your hosting platform uses another path
 const CHAT_JSON_DEST = path.join(__dirname, "chat.json");
 
+// Download `chat.json` if missing
 if (!fs.existsSync(CHAT_JSON_DEST)) {
-  console.log("📄 Writing chat.json from secret file...");
-  fs.copyFileSync(CHAT_JSON_SECRET_PATH, CHAT_JSON_DEST);
+  (async () => {
+    console.log("📄 chat.json not found — downloading from remote URL…");
+
+    try {
+      const response = await axios.get(CHAT_JSON_REMOTE_URL, {
+        responseType: "stream",
+      });
+
+      const file = fs.createWriteStream(CHAT_JSON_DEST);
+      response.data.pipe(file);
+
+      file.on("finish", () => {
+        file.close();
+        console.log("✅ chat.json downloaded and saved.");
+      });
+    } catch (err) {
+      console.error(`❌ Failed to download chat.json: ${err.message}`);
+    }
+  })();
 }
 
 app.use(
@@ -46,13 +69,11 @@ app.use(
   })
 );
 
-// Track temp file cleanup timers
-const tempTimers = {}; // filename -> timeoutId
+const tempTimers = {};
 
 function scheduleCleanup(tmpPath) {
   const filename = path.basename(tmpPath);
 
-  // clear any existing timer (reset it if file is accessed again)
   if (tempTimers[filename]) {
     clearTimeout(tempTimers[filename]);
   }
@@ -68,10 +89,9 @@ function scheduleCleanup(tmpPath) {
       });
     }
     delete tempTimers[filename];
-  }, 10 * 1000); // 10 seconds
+  }, 10 * 1000);
 }
 
-// delay helper
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 app.post("/api/login", (req, res) => {
@@ -99,9 +119,7 @@ app.get("/api/chat", (req, res) => {
 
   let chatData = [];
   try {
-    chatData = JSON.parse(
-      fs.readFileSync(path.join(__dirname, "chat.json"), "utf-8")
-    );
+    chatData = JSON.parse(fs.readFileSync(CHAT_JSON_DEST, "utf-8"));
   } catch (err) {
     console.error("Failed to read chat.json:", err.message);
     return res.status(500).send("Server error");
