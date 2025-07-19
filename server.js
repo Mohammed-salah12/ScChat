@@ -13,6 +13,13 @@ const { ADMIN_USERNAME, ADMIN_PASSWORD, MEGA_EMAIL, MEGA_PASSWORD } =
   process.env;
 
 const PORT = process.env.PORT || 3333;
+const CHAT_JSON_SECRET_PATH = "/etc/secrets/chat.json"; // adjust if your hosting platform uses another path
+const CHAT_JSON_DEST = path.join(__dirname, "chat.json");
+
+if (!fs.existsSync(CHAT_JSON_DEST)) {
+  console.log("📄 Writing chat.json from secret file...");
+  fs.copyFileSync(CHAT_JSON_SECRET_PATH, CHAT_JSON_DEST);
+}
 
 app.use(
   cors({
