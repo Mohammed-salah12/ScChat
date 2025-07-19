@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const session = require("express-session");
 const cors = require("cors");
@@ -6,6 +8,8 @@ const fs = require("fs");
 const { exec } = require("child_process");
 
 const app = express();
+
+const { ADMIN_USERNAME, ADMIN_PASSWORD, MEGA_EXEC_PATH } = process.env;
 
 app.use(
   cors({
@@ -34,14 +38,12 @@ app.use(
 );
 
 const PORT = process.env.PORT || 3333;
-
-// ✅ Fixed path to `mega-exec` (not mega-get!)
-const MEGA_EXEC = "/Applications/MEGAcmd.app/Contents/MacOS/mega-exec";
+const MEGA_EXEC = MEGA_EXEC_PATH;
 
 // LOGIN
 app.post("/api/login", (req, res) => {
   const { username, password } = req.body;
-  if (username === "admin" && password === "mypassword") {
+  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
     req.session.loggedIn = true;
     return res.json({ success: true });
   }
@@ -97,7 +99,6 @@ app.get("/api/media/:filename", (req, res) => {
   const filename = req.params.filename;
   const tmpPath = path.join("/tmp", filename);
 
-  // ✅ Use mega-exec directly with `get` command
   const cmd = `${MEGA_EXEC} get "/media/${filename}" "${tmpPath}"`;
 
   console.log(`Running: ${cmd}`);
