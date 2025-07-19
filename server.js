@@ -46,7 +46,10 @@ if (!fs.existsSync(CHAT_JSON_DEST)) {
 
 app.use(
   cors({
-    origin: ["http://localhost:3000", "charming-pastelito-c271fa.netlify.app"],
+    origin: [
+      "http://localhost:3000",
+      "https://charming-pastelito-c271fa.netlify.app",
+    ],
     credentials: true,
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
