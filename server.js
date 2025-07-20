@@ -16,7 +16,7 @@ const {
   MEGA_EMAIL,
   MEGA_PASSWORD,
   CHAT_JSON_REMOTE_URL,
-  JWT_SECRET = "super_secret_123",
+  JWT_SECRET,
 } = process.env;
 
 const PORT = process.env.PORT || 3333;
