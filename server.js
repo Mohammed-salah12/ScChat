@@ -1,11 +1,11 @@
 require("dotenv").config();
 
 const express = require("express");
-const session = require("express-session");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 const axios = require("axios");
+const jwt = require("jsonwebtoken");
 const { Storage } = require("megajs");
 
 const app = express();
@@ -16,24 +16,22 @@ const {
   MEGA_EMAIL,
   MEGA_PASSWORD,
   CHAT_JSON_REMOTE_URL,
+  JWT_SECRET = "super_secret_123",
 } = process.env;
 
 const PORT = process.env.PORT || 3333;
 const CHAT_JSON_DEST = path.join(__dirname, "chat.json");
 
-// Download `chat.json` if missing
+// Download chat.json if missing
 if (!fs.existsSync(CHAT_JSON_DEST)) {
   (async () => {
     console.log("📄 chat.json not found — downloading from remote URL…");
-
     try {
       const response = await axios.get(CHAT_JSON_REMOTE_URL, {
         responseType: "stream",
       });
-
       const file = fs.createWriteStream(CHAT_JSON_DEST);
       response.data.pipe(file);
-
       file.on("finish", () => {
         file.close();
         console.log("✅ chat.json downloaded and saved.");
@@ -46,7 +44,10 @@ if (!fs.existsSync(CHAT_JSON_DEST)) {
 
 app.use(
   cors({
-    origin: ["http://localhost:3000", "charming-pastelito-c271fa.netlify.app"],
+    origin: [
+      "http://localhost:3000",
+      "https://https://gorgeous-nougat-31e8ca.netlify.app",
+    ],
     credentials: true,
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -56,63 +57,42 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use(
-  session({
-    secret: "super_secret_123",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: false,
-      httpOnly: true,
-      sameSite: "lax",
-    },
-  })
-);
-
-const tempTimers = {};
-
-function scheduleCleanup(tmpPath) {
-  const filename = path.basename(tmpPath);
-
-  if (tempTimers[filename]) {
-    clearTimeout(tempTimers[filename]);
-  }
-
-  tempTimers[filename] = setTimeout(() => {
-    if (fs.existsSync(tmpPath)) {
-      fs.unlink(tmpPath, (err) => {
-        if (err) {
-          console.error(`Failed to delete ${tmpPath}:`, err.message);
-        } else {
-          console.log(`🧹 Deleted temp file: ${tmpPath}`);
-        }
-      });
-    }
-    delete tempTimers[filename];
-  }, 10 * 1000);
+// JWT helper functions
+function generateToken(username) {
+  return jwt.sign({ username }, JWT_SECRET, { expiresIn: "7d" });
 }
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function verifyToken(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return null;
+  const token = authHeader.split(" ")[1];
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
 
+// Login route
 app.post("/api/login", (req, res) => {
   const { username, password } = req.body;
   if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-    req.session.loggedIn = true;
-    return res.json({ success: true });
+    const token = generateToken(username);
+    return res.json({ success: true, token });
   }
   res.status(401).json({ success: false });
 });
 
+// Check auth
 app.get("/api/check", (req, res) => {
-  res.json({ loggedIn: !!req.session.loggedIn });
+  const payload = verifyToken(req);
+  res.json({ loggedIn: !!payload });
 });
 
-app.post("/api/logout", (req, res) => {
-  req.session.destroy(() => res.json({ success: true }));
-});
-
+// Chat data
 app.get("/api/chat", (req, res) => {
-  if (!req.session.loggedIn) return res.status(401).send("Unauthorized");
+  const payload = verifyToken(req);
+  if (!payload) return res.status(401).send("Unauthorized");
 
   const page = parseInt(req.query.page, 10) || 1;
   const pageSize = parseInt(req.query.pageSize, 10) || 50;
@@ -136,8 +116,33 @@ app.get("/api/chat", (req, res) => {
   res.json({ messages: pageMessages, page, totalPages });
 });
 
+// Temporary files cleanup
+const tempTimers = {};
+function scheduleCleanup(tmpPath) {
+  const filename = path.basename(tmpPath);
+  if (tempTimers[filename]) clearTimeout(tempTimers[filename]);
+
+  tempTimers[filename] = setTimeout(() => {
+    if (fs.existsSync(tmpPath)) {
+      fs.unlink(tmpPath, (err) => {
+        if (err) {
+          console.error(`Failed to delete ${tmpPath}:`, err.message);
+        } else {
+          console.log(`🧹 Deleted temp file: ${tmpPath}`);
+        }
+      });
+    }
+    delete tempTimers[filename];
+  }, 10 * 1000);
+}
+
+// Delay helper
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Media route
 app.get("/api/media/:filename", async (req, res) => {
-  if (!req.session.loggedIn) return res.status(401).send("Unauthorized");
+  const payload = verifyToken(req);
+  if (!payload) return res.status(401).send("Unauthorized");
 
   const filename = req.params.filename;
   const tmpPath = path.join("/tmp", filename);
@@ -145,11 +150,7 @@ app.get("/api/media/:filename", async (req, res) => {
   if (fs.existsSync(tmpPath)) {
     console.log(`[cache] serving ${filename}`);
     return res.sendFile(tmpPath, {}, (err) => {
-      if (err) {
-        console.error(`Failed to send file ${tmpPath}:`, err.message);
-      } else {
-        scheduleCleanup(tmpPath);
-      }
+      if (!err) scheduleCleanup(tmpPath);
     });
   }
 
@@ -193,11 +194,7 @@ app.get("/api/media/:filename", async (req, res) => {
       console.log(`[done] downloaded & cached ${filename}`);
 
       return res.sendFile(tmpPath, {}, (err) => {
-        if (err) {
-          console.error(`Failed to send file ${tmpPath}:`, err.message);
-        } else {
-          scheduleCleanup(tmpPath);
-        }
+        if (!err) scheduleCleanup(tmpPath);
       });
     } catch (err) {
       console.error(`attempt ${attempt} failed: ${err.message}`);
