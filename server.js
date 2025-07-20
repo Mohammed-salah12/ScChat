@@ -46,7 +46,7 @@ app.use(
   cors({
     origin: [
       "http://localhost:3000",
-      "https://https://gorgeous-nougat-31e8ca.netlify.app",
+      "https://gorgeous-nougat-31e8ca.netlify.app",
     ],
     credentials: true,
     methods: ["GET", "POST", "OPTIONS"],
