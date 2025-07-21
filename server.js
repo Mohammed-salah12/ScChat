@@ -6,21 +6,37 @@ const path = require("path");
 const fs = require("fs");
 const axios = require("axios");
 const jwt = require("jsonwebtoken");
-const { Storage } = require("megajs");
+const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { pipeline } = require("stream");
+const util = require("util");
+
+const streamPipeline = util.promisify(pipeline);
 
 const app = express();
 
 const {
   ADMIN_USERNAME,
   ADMIN_PASSWORD,
-  MEGA_EMAIL,
-  MEGA_PASSWORD,
-  CHAT_JSON_REMOTE_URL,
   JWT_SECRET,
+  CHAT_JSON_REMOTE_URL,
+  R2_ACCESS_KEY_ID,
+  R2_SECRET_ACCESS_KEY,
+  R2_BUCKET,
+  R2_ENDPOINT, // e.g., https://<accountid>.r2.cloudflarestorage.com
 } = process.env;
 
 const PORT = process.env.PORT || 3333;
 const CHAT_JSON_DEST = path.join(__dirname, "chat.json");
+
+// R2 client
+const s3 = new S3Client({
+  region: "auto",
+  endpoint: R2_ENDPOINT,
+  credentials: {
+    accessKeyId: R2_ACCESS_KEY_ID,
+    secretAccessKey: R2_SECRET_ACCESS_KEY,
+  },
+});
 
 // Download chat.json if missing
 if (!fs.existsSync(CHAT_JSON_DEST)) {
@@ -136,9 +152,6 @@ function scheduleCleanup(tmpPath) {
   }, 10 * 1000);
 }
 
-// Delay helper
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 // Media route
 app.get("/api/media/:filename", async (req, res) => {
   const payload = verifyToken(req);
@@ -156,54 +169,25 @@ app.get("/api/media/:filename", async (req, res) => {
 
   console.log(`[download] ${filename} not cached, downloading…`);
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const storage = new Storage({
-        email: MEGA_EMAIL,
-        password: MEGA_PASSWORD,
-      });
+  try {
+    const command = new GetObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: filename,
+    });
 
-      await new Promise((resolve, reject) => {
-        storage.on("ready", resolve);
-        storage.on("error", reject);
-      });
+    const r2Response = await s3.send(command);
 
-      const mediaFolder = storage.root.children.find(
-        (f) => f.name === "media" && f.directory
-      );
+    const writeStream = fs.createWriteStream(tmpPath);
+    await streamPipeline(r2Response.Body, writeStream);
 
-      if (!mediaFolder) {
-        storage.close();
-        return res.status(404).send("media folder not found");
-      }
+    console.log(`[done] downloaded & cached ${filename}`);
 
-      const file = mediaFolder.children.find((f) => f.name === filename);
-
-      if (!file) {
-        storage.close();
-        return res.status(404).send("file not found in media");
-      }
-
-      const ws = fs.createWriteStream(tmpPath);
-
-      await new Promise((resolve, reject) => {
-        file.download().pipe(ws).on("finish", resolve).on("error", reject);
-      });
-
-      storage.close();
-      console.log(`[done] downloaded & cached ${filename}`);
-
-      return res.sendFile(tmpPath, {}, (err) => {
-        if (!err) scheduleCleanup(tmpPath);
-      });
-    } catch (err) {
-      console.error(`attempt ${attempt} failed: ${err.message}`);
-      if (attempt < 3) {
-        await delay(3000);
-        continue;
-      }
-      return res.status(500).send("failed to download from MEGA");
-    }
+    return res.sendFile(tmpPath, {}, (err) => {
+      if (!err) scheduleCleanup(tmpPath);
+    });
+  } catch (err) {
+    console.error(`❌ Failed to download from R2: ${err.message}`);
+    return res.status(500).send("Failed to download from R2");
   }
 });
 
