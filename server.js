@@ -62,7 +62,7 @@ app.use(
   cors({
     origin: [
       "http://localhost:3000",
-      "https://lively-moxie-081f3e.netlify.app",
+      "https://rad-arithmetic-166bae.netlify.app",
     ],
     credentials: true,
     methods: ["GET", "POST", "OPTIONS"],
